@@ -175,20 +175,74 @@ const GAS_API_URL='https://script.google.com/macros/s/AKfycbzqdQ0XkX1mWpXLezLyaP
 let currentRole='user';
 let adminSessionToken='';
 
-// Kirim payload sebagai text/plain agar browser tidak memicu preflight OPTIONS.
-async function callGasApi(action, data={}){
-  const response = await fetch(GAS_API_URL, {
-    method:'POST',
-    headers:{'Content-Type':'text/plain;charset=UTF-8'},
-    body:JSON.stringify({action, ...data}),
-    redirect:'follow'
+// Komunikasi melalui iframe Bridge.html, bukan fetch lintas domain.
+// doGet(e) di Apps Script harus mendukung parameter ?bridge=1.
+const BRIDGE_URL = GAS_API_URL + '?bridge=1';
+let bridgeFrame = null;
+let bridgeReady = false;
+const bridgePending = new Map();
+
+function ensureBridge(){
+  if(bridgeFrame) return;
+  bridgeFrame=document.createElement('iframe');
+  bridgeFrame.title='MIS secure communication bridge';
+  bridgeFrame.setAttribute('aria-hidden','true');
+  bridgeFrame.style.cssText='position:absolute;width:1px;height:1px;left:-9999px;border:0;';
+  bridgeFrame.src=BRIDGE_URL;
+  bridgeFrame.onload=()=>{ /* Bridge mengirim MIS_BRIDGE_READY saat siap. */ };
+  document.body.appendChild(bridgeFrame);
+}
+
+window.addEventListener('message',function(event){
+  // Kunci sumber ke iframe yang dibuat oleh halaman ini.
+  if(!bridgeFrame || event.source!==bridgeFrame.contentWindow) return;
+  const msg=event.data;
+  if(!msg || typeof msg!=='object') return;
+  if(msg.type==='MIS_BRIDGE_READY'){
+    bridgeReady=true;
+    return;
+  }
+  if(msg.type!=='MIS_API_RESPONSE' || typeof msg.requestId!=='string') return;
+  const pending=bridgePending.get(msg.requestId);
+  if(!pending) return;
+  clearTimeout(pending.timer);
+  bridgePending.delete(msg.requestId);
+  if(msg.error) pending.reject(new Error(String(msg.error)));
+  else if(!msg.result || typeof msg.result!=='object') pending.reject(new Error('Respons bridge tidak valid.'));
+  else pending.resolve(msg.result);
+});
+
+function callGasApi(action,data={}){
+  ensureBridge();
+  return new Promise((resolve,reject)=>{
+    const requestId='mis_'+Date.now()+'_'+Math.random().toString(36).slice(2,10);
+    const timer=setTimeout(()=>{
+      bridgePending.delete(requestId);
+      reject(new Error('Bridge belum merespons. Periksa Bridge.html, origin GitHub Pages, dan deployment Apps Script.'));
+    },20000);
+    bridgePending.set(requestId,{resolve,reject,timer});
+    const send=()=>{
+      if(!bridgeFrame || !bridgeFrame.contentWindow){
+        clearTimeout(timer);bridgePending.delete(requestId);
+        reject(new Error('Frame penghubung belum tersedia.'));return;
+      }
+      // Target '*' diperlukan karena URL web app dapat dialihkan ke origin Google lain.
+      // Bridge harus memvalidasi event.origin dan event.source sebelum memproses pesan.
+      bridgeFrame.contentWindow.postMessage({type:'MIS_API_REQUEST',requestId,action,data},'*');
+    };
+    if(bridgeReady) send();
+    else {
+      const waitStart=Date.now();
+      const wait=()=>{
+        if(bridgeReady) send();
+        else if(Date.now()-waitStart>10000){
+          clearTimeout(timer);bridgePending.delete(requestId);
+          reject(new Error('Bridge belum siap. Pastikan file Bridge.html tersedia dan deployment diperbarui.'));
+        } else setTimeout(wait,150);
+      };
+      wait();
+    }
   });
-  if(!response.ok) throw new Error('Server merespons HTTP '+response.status);
-  const text = await response.text();
-  let result;
-  try { result=JSON.parse(text); } catch(e) { throw new Error('Respons Apps Script bukan JSON. Periksa deployment web app dan aksesnya.'); }
-  if(!result || typeof result!=='object') throw new Error('Respons server tidak valid.');
-  return result;
 }
 function showAdminLogin(){document.getElementById('adminPasswordArea').classList.add('show');document.getElementById('adminPassword').focus();document.getElementById('loginMessage').textContent='';}
 function loginUser(){currentRole='user';adminSessionToken='';enterApp();}
