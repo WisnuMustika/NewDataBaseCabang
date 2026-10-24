@@ -171,31 +171,51 @@ const pageNames={
  'monitoring-2026':'Monitoring 2026','monitoring-2025':'Monitoring 2025',
  'update-yesterday':'Update Progress Hari Kemarin','update-monthly':'Update Terbaik Bulanan'
 };
+const GAS_API_URL='https://script.google.com/macros/s/AKfycbzqdQ0XkX1mWpXLezLyaP_Evr_cP3dtio2DyMNJzOVP15RiPFqDX-bNqkHZbfSAujbm/exec';
 let currentRole='user';
 let adminSessionToken='';
+
+// Kirim payload sebagai text/plain agar browser tidak memicu preflight OPTIONS.
+async function callGasApi(action, data={}){
+  const response = await fetch(GAS_API_URL, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=UTF-8'},
+    body:JSON.stringify({action, ...data}),
+    redirect:'follow'
+  });
+  if(!response.ok) throw new Error('Server merespons HTTP '+response.status);
+  const text = await response.text();
+  let result;
+  try { result=JSON.parse(text); } catch(e) { throw new Error('Respons Apps Script bukan JSON. Periksa deployment web app dan aksesnya.'); }
+  if(!result || typeof result!=='object') throw new Error('Respons server tidak valid.');
+  return result;
+}
 function showAdminLogin(){document.getElementById('adminPasswordArea').classList.add('show');document.getElementById('adminPassword').focus();document.getElementById('loginMessage').textContent='';}
 function loginUser(){currentRole='user';adminSessionToken='';enterApp();}
-function loginAdmin(){
+async function loginAdmin(){
  const password=document.getElementById('adminPassword').value;
  const message=document.getElementById('loginMessage');
  if(!password){message.textContent='Masukkan password MIS terlebih dahulu.';return;}
- message.textContent='Memverifikasi akses...';
- // Password tidak disimpan atau diperiksa di browser. Buat fungsi verifyAdminPassword
- // pada Code.gs untuk validasi server-side sebelum mengaktifkan akses admin.
- if(typeof google!=='undefined' && google.script && google.script.run){
-   google.script.run.withSuccessHandler(function(result){
-     if(result && result.success===true && result.token){
-       currentRole='admin';
-       adminSessionToken=result.token;
-       enterApp();
-     } else {
-       message.textContent=(result && result.message) || 'Password MIS salah atau akses ditolak.';
-       document.getElementById('adminPassword').value='';
-     }
-   }).withFailureHandler(function(){message.textContent='Verifikasi MIS gagal. Periksa koneksi server dan fungsi verifyAdminPassword di Code.gs.';})
-   .verifyAdminPassword(password);
- } else {
-   message.textContent='Server keamanan MIS belum terhubung. Halaman GitHub Pages memerlukan koneksi HTTP ke Google Apps Script.';
+ message.textContent='Menghubungkan ke server dan memverifikasi MIS...';
+ const button=document.querySelector('.password-area .primary');
+ if(button){button.disabled=true;button.textContent='Memverifikasi...';}
+ try {
+   const result=await callGasApi('verifyAdminPassword',{password});
+   if(result.success===true && result.token){
+     currentRole='admin';
+     adminSessionToken=result.token;
+     document.getElementById('adminPassword').value='';
+     message.textContent='';
+     enterApp();
+   } else {
+     message.textContent=(result && result.message) || 'Password MIS salah atau akses ditolak.';
+     document.getElementById('adminPassword').value='';
+   }
+ } catch(error) {
+   console.error('MIS login error:',error);
+   message.textContent='Tidak dapat menghubungi server MIS. Periksa URL deployment Apps Script, akses deployment, dan koneksi internet. Detail: '+(error.message||'koneksi gagal');
+ } finally {
+   if(button){button.disabled=false;button.textContent='Verifikasi MIS & Masuk';}
  }
 }
 function enterApp(){
@@ -208,28 +228,35 @@ function enterApp(){
  document.getElementById('userAvatar').textContent=currentRole==='admin'?'A':'U';
  openPage('dashboard',document.querySelector('[data-page="dashboard"]'));
 }
-function logout(){
- if(adminSessionToken && typeof google!=='undefined' && google.script && google.script.run){
-   google.script.run.logoutAdmin(adminSessionToken);
- }
+async function logout(){
+ const token=adminSessionToken;
  adminSessionToken='';
+ if(token){ callGasApi('logoutAdmin',{token}).catch(err=>console.warn('Logout server:',err)); }
  currentRole='user';
- document.getElementById('app').style.display='none';document.getElementById('loginScreen').style.display='grid';document.getElementById('adminPassword').value='';document.getElementById('adminPasswordArea').classList.remove('show');}
-// Panggil helper ini untuk setiap operasi admin di masa mendatang.
-function callAdminServer(functionName, args, onSuccess, onFailure){
+ document.getElementById('app').style.display='none';
+ document.getElementById('loginScreen').style.display='grid';
+ document.getElementById('adminPassword').value='';
+ document.getElementById('adminPasswordArea').classList.remove('show');
+}
+
+// Gunakan endpoint API untuk operasi MIS. Backend hanya menerima aksi yang diizinkan.
+async function callAdminServer(functionName, args, onSuccess, onFailure){
  if(currentRole!=='admin' || !adminSessionToken){
    showToast('Akses MIS diperlukan. Silakan login kembali.');
    return;
  }
- const allowedFunctions=['saveProgressData','saveMonthlyAchievement','getAdminData'];
+ const allowedFunctions=['saveProgressData','saveMonthlyAchievement','getAdminData','getAdminSessionInfo'];
  if(!allowedFunctions.includes(functionName)){
    showToast('Operasi server tidak diizinkan dari halaman ini.');
    return;
  }
- const runner=google.script.run
-   .withSuccessHandler(onSuccess || function(){})
-   .withFailureHandler(onFailure || function(){showToast('Permintaan ke server gagal.');});
- runner[functionName](adminSessionToken, ...(args || []));
+ try {
+   const result=await callGasApi(functionName,{token:adminSessionToken,args:args||[]});
+   if(result && result.success===false) throw new Error(result.message||'Permintaan ditolak.');
+   if(onSuccess) onSuccess(result); else return result;
+ } catch(error) {
+   if(onFailure) onFailure(error); else showToast(error.message||'Permintaan ke server gagal.');
+ }
 }
 function toggleSubmenu(id,button){document.getElementById(id).classList.toggle('open');button.classList.toggle('active');}
 function openPage(key,button){
